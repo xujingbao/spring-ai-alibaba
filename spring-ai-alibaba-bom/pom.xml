@@ -66,6 +66,9 @@
     </developers>
 
     <properties>
+        <!-- Repository Configuration -->
+        <repository_home>http://172.16.60.188:8081/nexus/content</repository_home>
+        
         <!-- Plugin Versions -->
         <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>3.1.2</maven-surefire-plugin.version>
@@ -86,6 +89,19 @@
         <!-- Maven Central Portal -->
         <central.publishing.maven.version>0.7.0</central.publishing.maven.version>
     </properties>
+
+    <distributionManagement>
+        <repository>
+            <id>nexus-releases</id>
+            <name>Nexus Release Repository</name>
+            <url>${repository_home}/repositories/releases</url>
+        </repository>
+        <snapshotRepository>
+            <id>nexus-snapshots</id>
+            <name>Nexus Snapshot Repository</name>
+            <url>${repository_home}/repositories/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <dependencyManagement>
         <dependencies>
@@ -732,6 +748,20 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-deploy-plugin</artifactId>
                 <version>${maven-deploy-plugin.version}</version>
+                <configuration>
+                    <servers>
+                        <server>
+                            <id>nexus-releases</id>
+                            <username>${nexus.username}</username>
+                            <password>${nexus.password}</password>
+                        </server>
+                        <server>
+                            <id>nexus-snapshots</id>
+                            <username>${nexus.username}</username>
+                            <password>${nexus.password}</password>
+                        </server>
+                    </servers>
+                </configuration>
             </plugin>
         </plugins>
     </build>
@@ -985,12 +1015,25 @@
 
     <repositories>
         <repository>
-            <id>spring-milestones</id>
-            <name>Spring Milestones</name>
-            <url>https://repo.spring.io/milestone</url>
+            <id>nexus-public</id>
+            <name>Nexus Public Repository</name>
+            <url>${repository_home}/groups/public</url>
+        </repository>
+        <repository>
             <snapshots>
                 <enabled>false</enabled>
             </snapshots>
+            <id>spring-milestones</id>
+            <name>Spring Milestones</name>
+            <url>https://repo.spring.io/milestone</url>
+        </repository>
+        <repository>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+            <id>spring-snapshots</id>
+            <name>Spring Snapshots</name>
+            <url>https://repo.spring.io/snapshot</url>
         </repository>
     </repositories>
 

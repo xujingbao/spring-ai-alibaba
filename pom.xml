@@ -187,7 +187,23 @@
         <url>https://github.com/alibaba/spring-ai-alibaba/actions</url>
     </ciManagement>
 
+    <distributionManagement>
+        <repository>
+            <id>nexus-releases</id>
+            <name>Nexus Release Repository</name>
+            <url>${repository_home}/repositories/releases</url>
+        </repository>
+        <snapshotRepository>
+            <id>nexus-snapshots</id>
+            <name>Nexus Snapshot Repository</name>
+            <url>${repository_home}/repositories/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
+
     <properties>
+
+        <!-- Private Repository Configuration -->
+        <repository_home>http://172.16.60.188:8081/nexus/content</repository_home>
 
         <!-- Spring AI Alibaba Version -->
         <revision>1.0.0.3-SNAPSHOT</revision>
@@ -324,6 +340,11 @@
 
     <repositories>
         <repository>
+            <id>nexus-public</id>
+            <name>Nexus Public Repository</name>
+            <url>${repository_home}/groups/public</url>
+        </repository>
+        <repository>
             <snapshots>
                 <enabled>false</enabled>
             </snapshots>
@@ -352,6 +373,25 @@
             </plugins>
         </pluginManagement>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <version>3.1.1</version>
+                <configuration>
+                    <servers>
+                        <server>
+                            <id>nexus-releases</id>
+                            <username>${nexus.username}</username>
+                            <password>${nexus.password}</password>
+                        </server>
+                        <server>
+                            <id>nexus-snapshots</id>
+                            <username>${nexus.username}</username>
+                            <password>${nexus.password}</password>
+                        </server>
+                    </servers>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>io.spring.javaformat</groupId>
                 <artifactId>spring-javaformat-maven-plugin</artifactId>
@@ -567,19 +607,6 @@
     <profiles>
         <profile>
             <id>release</id>
-
-            <distributionManagement>
-                <repository>
-                    <id>sonatype-nexus-staging</id>
-                    <name>Nexus Release Repository</name>
-                    <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-                </repository>
-                <snapshotRepository>
-                    <id>sonatype-nexus-snapshots</id>
-                    <name>Sonatype Nexus Snapshots</name>
-                    <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
-                </snapshotRepository>
-            </distributionManagement>
             <build>
                 <plugins>
                     <plugin>
