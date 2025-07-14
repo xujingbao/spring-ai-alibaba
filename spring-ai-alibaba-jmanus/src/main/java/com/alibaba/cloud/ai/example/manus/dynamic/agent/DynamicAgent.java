@@ -15,7 +15,6 @@
  */
 package com.alibaba.cloud.ai.example.manus.dynamic.agent;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -25,6 +24,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import com.alibaba.cloud.ai.example.manus.dynamic.model.entity.DynamicModelEntity;
 import com.alibaba.cloud.ai.example.manus.dynamic.prompt.model.enums.PromptEnum;
 import com.alibaba.cloud.ai.example.manus.dynamic.prompt.service.PromptService;
 import com.alibaba.cloud.ai.example.manus.planning.service.UserInputService;
@@ -55,9 +55,6 @@ import com.alibaba.cloud.ai.example.manus.llm.LlmService;
 import com.alibaba.cloud.ai.example.manus.planning.PlanningFactory.ToolCallBackContext;
 import com.alibaba.cloud.ai.example.manus.planning.executor.PlanExecutor;
 import com.alibaba.cloud.ai.example.manus.recorder.PlanExecutionRecorder;
-import com.alibaba.cloud.ai.example.manus.recorder.entity.AgentExecutionRecord;
-import com.alibaba.cloud.ai.example.manus.recorder.entity.PlanExecutionRecord;
-import com.alibaba.cloud.ai.example.manus.recorder.entity.ThinkActRecord;
 import com.alibaba.cloud.ai.example.manus.tool.TerminableTool;
 import com.alibaba.cloud.ai.example.manus.tool.ToolCallBiFunctionDef;
 import com.alibaba.cloud.ai.example.manus.tool.FormInputTool;
@@ -82,11 +79,14 @@ public class DynamicAgent extends ReActAgent {
 
 	private Prompt userPrompt;
 
-	protected ThinkActRecord thinkActRecord;
+	// 存储当前创建的ThinkActRecord ID，用于后续的action记录
+	private Long currentThinkActRecordId;
 
 	private final ToolCallingManager toolCallingManager;
 
 	private final UserInputService userInputService;
+
+	private final DynamicModelEntity model;
 
 	public void clearUp(String planId) {
 		Map<String, ToolCallBackContext> toolCallBackContext = toolCallbackProvider.getToolCallBackContext();
@@ -107,7 +107,8 @@ public class DynamicAgent extends ReActAgent {
 	public DynamicAgent(LlmService llmService, PlanExecutionRecorder planExecutionRecorder,
 			ManusProperties manusProperties, String name, String description, String nextStepPrompt,
 			List<String> availableToolKeys, ToolCallingManager toolCallingManager,
-			Map<String, Object> initialAgentSetting, UserInputService userInputService, PromptService promptService) {
+			Map<String, Object> initialAgentSetting, UserInputService userInputService, PromptService promptService,
+			DynamicModelEntity model) {
 		super(llmService, planExecutionRecorder, manusProperties, initialAgentSetting, promptService);
 		this.agentName = name;
 		this.agentDescription = description;
@@ -115,24 +116,12 @@ public class DynamicAgent extends ReActAgent {
 		this.availableToolKeys = availableToolKeys;
 		this.toolCallingManager = toolCallingManager;
 		this.userInputService = userInputService;
+		this.model = model;
 	}
 
 	@Override
 	protected boolean think() {
 		collectAndSetEnvDataForTools();
-		PlanExecutionRecord planExecutionRecord = planExecutionRecorder.getExecutionRecord(getCurrentPlanId(),
-				getRootPlanId(), getThinkActRecordId());
-		AgentExecutionRecord agentExecutionRecord = planExecutionRecorder
-			.getCurrentAgentExecutionRecord(planExecutionRecord);
-		thinkActRecord = new ThinkActRecord(agentExecutionRecord.getId());
-		thinkActRecord.setActStartTime(LocalDateTime.now());
-		// set id
-		thinkActRecord.getId();
-
-		if (planExecutionRecord != null) {
-			planExecutionRecorder.recordThinkActExecution(planExecutionRecord, agentExecutionRecord.getId(),
-					thinkActRecord);
-		}
 
 		try {
 			return executeWithRetry(3);
@@ -140,15 +129,26 @@ public class DynamicAgent extends ReActAgent {
 		catch (Exception e) {
 			log.error(String.format("🚨 Oops! The %s's thinking process hit a snag: %s", getName(), e.getMessage()), e);
 			log.info("Exception occurred", e);
-			thinkActRecord.recordError(e.getMessage());
+
+			// 记录思考失败
+			PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+			params.setCurrentPlanId(getCurrentPlanId());
+			params.setRootPlanId(getRootPlanId());
+			params.setThinkActRecordId(getThinkActRecordId());
+			params.setAgentName(getName());
+			params.setAgentDescription(getDescription());
+			params.setThinkInput(null);
+			params.setThinkOutput(null);
+			params.setActionNeeded(false);
+			params.setToolName(null);
+			params.setToolParameters(null);
+			params.setModelName(null);
+			params.setErrorMessage(e.getMessage());
+			planExecutionRecorder.recordThinkingAndAction(params);
+
 			return false;
 		}
-		finally {
-			if (planExecutionRecord != null) {
-				planExecutionRecorder.recordThinkActExecution(planExecutionRecord, agentExecutionRecord.getId(),
-						thinkActRecord);
-			}
-		}
+
 	}
 
 	private boolean executeWithRetry(int maxRetries) throws Exception {
@@ -160,7 +160,8 @@ public class DynamicAgent extends ReActAgent {
 			Message currentStepEnvMessage = currentStepEnvMessage();
 			// Record think message
 			List<Message> thinkMessages = Arrays.asList(systemMessage, currentStepEnvMessage);
-			thinkActRecord.startThinking(thinkMessages.toString());
+			String thinkInput = thinkMessages.toString();
+
 			log.debug("Messages prepared for the prompt: {}", thinkMessages);
 			// Build current prompt. System message is the first message
 			List<Message> messages = new ArrayList<>(Collections.singletonList(systemMessage));
@@ -173,13 +174,19 @@ public class DynamicAgent extends ReActAgent {
 			ChatOptions chatOptions = ToolCallingChatOptions.builder().internalToolExecutionEnabled(false).build();
 			userPrompt = new Prompt(messages, chatOptions);
 			List<ToolCallback> callbacks = getToolCallList();
-			ChatClient chatClient = llmService.getAgentChatClient();
+			ChatClient chatClient;
+			if (model == null) {
+				chatClient = llmService.getAgentChatClient();
+			}
+			else {
+				chatClient = llmService.getDynamicChatClient(model.getBaseUrl(), model.getApiKey(),
+						model.getModelName());
+			}
 			response = chatClient.prompt(userPrompt).toolCallbacks(callbacks).call().chatResponse();
+			String modelName = response.getMetadata().getModel();
 
 			List<ToolCall> toolCalls = response.getResult().getOutput().getToolCalls();
 			String responseByLLm = response.getResult().getOutput().getText();
-
-			thinkActRecord.finishThinking(responseByLLm);
 
 			log.info(String.format("✨ %s's thoughts: %s", getName(), responseByLLm));
 			log.info(String.format("🛠️ %s selected %d tools to use", getName(), toolCalls.size()));
@@ -187,32 +194,59 @@ public class DynamicAgent extends ReActAgent {
 			if (!toolCalls.isEmpty()) {
 				log.info(String.format("🧰 Tools being prepared: %s",
 						toolCalls.stream().map(ToolCall::name).collect(Collectors.toList())));
-				thinkActRecord.setActionNeeded(true);
-				thinkActRecord.setToolName(toolCalls.get(0).name());
-				thinkActRecord.setToolParameters(toolCalls.get(0).arguments());
-				thinkActRecord.setStatus("SUCCESS");
+
+				// 记录成功的思考和动作准备
+				String toolName = toolCalls.get(0).name();
+				String toolParameters = toolCalls.get(0).arguments();
+				PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+				params.setCurrentPlanId(getCurrentPlanId());
+				params.setRootPlanId(getRootPlanId());
+				params.setThinkActRecordId(getThinkActRecordId());
+				params.setAgentName(getName());
+				params.setAgentDescription(getDescription());
+				params.setThinkInput(thinkInput);
+				params.setThinkOutput(responseByLLm);
+				params.setActionNeeded(true);
+				params.setToolName(toolName);
+				params.setToolParameters(toolParameters);
+				params.setModelName(modelName);
+				params.setErrorMessage(null);
+				currentThinkActRecordId = planExecutionRecorder.recordThinkingAndAction(params);
+
 				return true;
 			}
-
 			log.warn("Attempt {}: No tools selected. Retrying...", attempt);
 		}
 
-		thinkActRecord.setStatus("FAILED");
+		// 记录思考失败（没有选择工具）
+		PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+		params.setCurrentPlanId(getCurrentPlanId());
+		params.setRootPlanId(getRootPlanId());
+		params.setThinkActRecordId(getThinkActRecordId());
+		params.setAgentName(getName());
+		params.setAgentDescription(getDescription());
+		params.setThinkInput(null);
+		params.setThinkOutput("No tools selected after retries");
+		params.setActionNeeded(false);
+		params.setToolName(null);
+		params.setToolParameters(null);
+		params.setModelName(null);
+		params.setErrorMessage("Failed to select tools after " + maxRetries + " attempts");
+		planExecutionRecorder.recordThinkingAndAction(params);
+
 		return false;
 	}
 
 	@Override
 	protected AgentExecResult act() {
 		ToolExecutionResult toolExecutionResult = null;
-		PlanExecutionRecord planExecutionRecord = planExecutionRecorder.getExecutionRecord(getCurrentPlanId(),
-				getRootPlanId(), getThinkActRecordId());
-		AgentExecutionRecord agentExecutionRecord = planExecutionRecorder
-			.getCurrentAgentExecutionRecord(planExecutionRecord);
+
 		try {
 			List<ToolCall> toolCalls = response.getResult().getOutput().getToolCalls();
 			ToolCall toolCall = toolCalls.get(0);
-
-			thinkActRecord.startAction("Executing tool: " + toolCall.name(), toolCall.name(), toolCall.arguments());
+			String toolName = toolCall.name();
+			String toolParameters = toolCall.arguments();
+			String actionDescription = "Executing tool: " + toolName;
 
 			toolExecutionResult = toolCallingManager.executeToolCalls(userPrompt, response);
 
@@ -224,7 +258,6 @@ public class DynamicAgent extends ReActAgent {
 
 			log.info(String.format("🔧 Tool %s's executing result: %s", getName(), llmCallResponse));
 
-			thinkActRecord.finishAction(llmCallResponse, "SUCCESS");
 			String toolcallName = toolCall.name();
 
 			// Get the tool instance based on toolCallName
@@ -265,8 +298,23 @@ public class DynamicAgent extends ReActAgent {
 						processUserInputToMemory(userMessage);
 						userInputService.removeFormInputTool(getCurrentPlanId()); // Clean
 																					// up
-						return new AgentExecResult("Input timeout occurred.", AgentState.IN_PROGRESS); // Or
-																										// FAILED
+
+						// 记录输入超时的动作结果
+						PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+						params.setCurrentPlanId(getCurrentPlanId());
+						params.setRootPlanId(getRootPlanId());
+						params.setThinkActRecordId(getThinkActRecordId());
+						params.setCreatedThinkActRecordId(currentThinkActRecordId);
+						params.setActionDescription(actionDescription);
+						params.setActionResult("Input timeout occurred");
+						params.setStatus("TIMEOUT");
+						params.setErrorMessage("Input timeout occurred for FormInputTool");
+						params.setToolName(toolName);
+						params.setToolParameters(toolParameters);
+						params.setSubPlanCreated(false);
+						planExecutionRecorder.recordActionResult(params);
+
+						return new AgentExecResult("Input timeout occurred.", AgentState.IN_PROGRESS);
 					}
 				}
 			}
@@ -281,6 +329,22 @@ public class DynamicAgent extends ReActAgent {
 																				// any
 																				// pending
 																				// form
+
+					// 记录成功完成的动作结果
+					PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+					params.setCurrentPlanId(getCurrentPlanId());
+					params.setRootPlanId(getRootPlanId());
+					params.setThinkActRecordId(getThinkActRecordId());
+					params.setCreatedThinkActRecordId(currentThinkActRecordId);
+					params.setActionDescription(actionDescription);
+					params.setActionResult(llmCallResponse);
+					params.setStatus("COMPLETED");
+					params.setErrorMessage(null);
+					params.setToolName(toolName);
+					params.setToolParameters(toolParameters);
+					params.setSubPlanCreated(false);
+					planExecutionRecorder.recordActionResult(params);
+
 					return new AgentExecResult(llmCallResponse, AgentState.COMPLETED);
 				}
 				else {
@@ -288,23 +352,60 @@ public class DynamicAgent extends ReActAgent {
 				}
 			}
 
+			// 记录成功的动作结果
+			PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+			params.setCurrentPlanId(getCurrentPlanId());
+			params.setRootPlanId(getRootPlanId());
+			params.setThinkActRecordId(getThinkActRecordId());
+			params.setCreatedThinkActRecordId(currentThinkActRecordId);
+			params.setActionDescription(actionDescription);
+			params.setActionResult(llmCallResponse);
+			params.setStatus("SUCCESS");
+			params.setErrorMessage(null);
+			params.setToolName(toolName);
+			params.setToolParameters(toolParameters);
+			params.setSubPlanCreated(false);
+			planExecutionRecorder.recordActionResult(params);
+
 			return new AgentExecResult(llmCallResponse, AgentState.IN_PROGRESS);
 		}
 		catch (Exception e) {
 
 			log.error(e.getMessage());
 			log.info("Exception occurred", e);
-			thinkActRecord.recordError(e.getMessage());
+
+			// 记录失败的动作结果
+			String toolName = null;
+			String toolParameters = null;
+			String actionDescription = "Tool execution failed";
+			if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
+				List<ToolCall> toolCalls = response.getResult().getOutput().getToolCalls();
+				if (!toolCalls.isEmpty()) {
+					toolName = toolCalls.get(0).name();
+					toolParameters = toolCalls.get(0).arguments();
+					actionDescription = "Executing tool: " + toolName;
+				}
+			}
+
+			PlanExecutionRecorder.PlanExecutionParams params = new PlanExecutionRecorder.PlanExecutionParams();
+			params.setCurrentPlanId(getCurrentPlanId());
+			params.setRootPlanId(getRootPlanId());
+			params.setThinkActRecordId(getThinkActRecordId());
+			params.setCreatedThinkActRecordId(currentThinkActRecordId);
+			params.setActionDescription(actionDescription);
+			params.setActionResult(null);
+			params.setStatus("FAILED");
+			params.setErrorMessage(e.getMessage());
+			params.setToolName(toolName);
+			params.setToolParameters(toolParameters);
+			params.setSubPlanCreated(false);
+			planExecutionRecorder.recordActionResult(params);
+
 			userInputService.removeFormInputTool(getCurrentPlanId()); // Clean up on error
 			processMemory(toolExecutionResult); // Process memory even on error
 			return new AgentExecResult(e.getMessage(), AgentState.FAILED);
 		}
-		finally {
-			if (planExecutionRecord != null) {
-				planExecutionRecorder.recordThinkActExecution(planExecutionRecord, agentExecutionRecord.getId(),
-						thinkActRecord);
-			}
-		}
+
 	}
 
 	private void processUserInputToMemory(UserMessage userMessage) {
